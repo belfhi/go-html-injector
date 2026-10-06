@@ -38,7 +38,6 @@ func main() {
 	// Read configuration from environment variables
 	backendURL := getEnv("BACKEND_URL", "http://localhost:3000")
 	listenAddr := getEnv("LISTEN_ADDR", ":8080")
-	healthCheckInterval := getEnvDuration("HEALTH_CHECK_INTERVAL", 30*time.Second)
 
 	// Parse the backend URL
 	target, err := url.Parse(backendURL)
@@ -47,19 +46,19 @@ func main() {
 	}
 
 	// Create the reverse proxy
-    proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy := httputil.NewSingleHostReverseProxy(target)
 
-    // Modern Rewrite hook replaces the deprecated Director
-    proxy.Rewrite = func(pr *httputil.ProxyRequest) {
-        // Sets upstream target URL and standard X-Forwarded headers automatically
-        pr.SetURL(target)
+	// Use modern Rewrite hook instead of deprecated Director
+	proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+		// Sets target URL and standard X-Forwarded headers automatically
+		pr.SetURL(target)
 
-        // Disable upstream compression so we can modify the body safely
-        pr.Out.Header.Set("Accept-Encoding", "identity")
+		// Disable upstream compression so we can modify the body safely
+		pr.Out.Header.Set("Accept-Encoding", "identity")
 
-        // Preserve original host header on the outbound request
-        pr.Out.Host = target.Host
-    }
+		// Preserve original host header on outbound request
+		pr.Out.Host = target.Host
+	}
 
 	// Wrap the response with our injection logic
 	proxy.ModifyResponse = func(resp *http.Response) error {
@@ -91,32 +90,32 @@ func main() {
 			newBody = append(newBody, body[idx:]...)
 			resp.Body = io.NopCloser(bytes.NewReader(newBody))
 		} else {
-			// If no </body> tag found, just return original content
+			// If no </body> tag found, return original content
 			resp.Body = io.NopCloser(bytes.NewReader(body))
 		}
 
 		return nil
 	}
 
-	// Create the main HTTP server
+	// Route traffic: healthcheck endpoint locally, everything else to proxy
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "OK")
+	})
+	mux.Handle("/", proxy)
+
 	server := &http.Server{
 		Addr:    listenAddr,
-		Handler: proxy,
+		Handler: mux,
 	}
 
-	// Start the proxy server
-	log.Printf("Starting HTML injector proxy, forwarding to %s on %s", backendURL, listenAddr)
-	go func() {
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Proxy server error: %v", err)
-		}
-	}()
+	log.Printf("Starting HTML injector proxy on %s, forwarding to %s", listenAddr, backendURL)
+	log.Printf("Health check endpoint available on %s/healthz", listenAddr)
 
-	// Start a health check goroutine
-	go startHealthCheck(healthCheckInterval)
-
-	// Wait forever
-	select {}
+	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		log.Fatalf("Proxy server error: %v", err)
+	}
 }
 
 func getEnv(key, defaultVal string) string {
@@ -134,17 +133,4 @@ func getEnvDuration(key string, defaultVal time.Duration) time.Duration {
 		log.Printf("Invalid duration for %q: %s, using default %v", key, val, defaultVal)
 	}
 	return defaultVal
-}
-
-func startHealthCheck(interval time.Duration) {
-	http.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		io.WriteString(w, "OK")
-	})
-
-	log.Printf("Health check endpoint available on :8080/healthz")
-
-	// Slight delay to allow the main server to bind
-	time.Sleep(interval)
-	log.Printf("Health check starts responding...")
 }
