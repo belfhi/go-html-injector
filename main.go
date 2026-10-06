@@ -47,17 +47,19 @@ func main() {
 	}
 
 	// Create the reverse proxy
-	proxy := httputil.NewSingleHostReverseProxy(target)
+    proxy := httputil.NewSingleHostReverseProxy(target)
 
-	// Customize the Director to preserve original headers
-	originalDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
-		// Disable upstream compression so we can modify the body
-		req.Header.Set("Accept-Encoding", "identity")
-		// Preserve the original Host header
-		req.Host = target.Host
-	}
+    // Modern Rewrite hook replaces the deprecated Director
+    proxy.Rewrite = func(pr *httputil.ProxyRequest) {
+        // Sets upstream target URL and standard X-Forwarded headers automatically
+        pr.SetURL(target)
+
+        // Disable upstream compression so we can modify the body safely
+        pr.Out.Header.Set("Accept-Encoding", "identity")
+
+        // Preserve original host header on the outbound request
+        pr.Out.Host = target.Host
+    }
 
 	// Wrap the response with our injection logic
 	proxy.ModifyResponse = func(resp *http.Response) error {
